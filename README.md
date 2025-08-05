@@ -1,8 +1,17 @@
-# Pi Badge Image Display
+# Pi Badge - Last.fm Tamagotchi
 
-A simple Python script to display images in fullscreen on a Raspberry Pi Zero 2 W.
+A Raspberry Pi Zero 2 W badge that displays a digital pet that feeds on your Last.fm scrobbles! Your music listening habits power a cute tamagotchi that grows, evolves, and gets happy when you listen to music.
 
-## Features
+## 🌟 Features
+
+- **Last.fm Tamagotchi**: Digital pet that feeds on your music scrobbles
+- **Evolution System**: Pet evolves through 5 stages as it levels up
+- **Real-time Display**: Beautiful fullscreen interface showing pet stats
+- **Discord Integration**: Share pet updates with your Discord server
+- **Auto-start**: Runs automatically when your Pi boots
+- **Original Image Display**: Still supports the original image display functionality
+
+## Original Features
 
 - Fullscreen image display
 - Automatic image resizing to fit screen
@@ -10,7 +19,52 @@ A simple Python script to display images in fullscreen on a Raspberry Pi Zero 2 
 - ESC key to exit
 - Support for common image formats (JPG, PNG, GIF, etc.)
 
-## Setup Instructions
+## 🎵 Quick Start - Tamagotchi Mode
+
+### 1. Get Last.fm API Key
+1. Go to [Last.fm API](https://www.last.fm/api/account/create)
+2. Create an account and get your API key
+3. Note your Last.fm username
+
+### 2. Set Up Your Pi
+```bash
+# Run the tamagotchi setup
+chmod +x setup_tamagotchi.sh
+./setup_tamagotchi.sh
+```
+
+### 3. Configure Environment
+```bash
+# Copy the template
+cp .env.template .env
+
+# Edit with your details
+nano .env
+```
+
+Add your Last.fm credentials:
+```
+LASTFM_API_KEY=your_api_key_here
+LASTFM_USERNAME=your_username_here
+```
+
+### 4. Start Your Tamagotchi
+```bash
+# Run manually
+python3 lastfm_tamagotchi.py
+
+# Or start as a service
+sudo systemctl start tamagotchi
+```
+
+## 🎮 Demo Mode
+
+Want to test without Last.fm? Run the demo:
+```bash
+python3 demo_tamagotchi.py
+```
+
+## 📖 Original Setup Instructions
 
 ### 1. Prepare Your Micro SD Card
 
@@ -117,16 +171,32 @@ sudo nano /etc/xdg/lxsession/LXDE-pi/autostart
 
 ```
 piBadge/
-├── display_image.py    # Main display script
-├── setup.sh           # Setup script
-├── requirements.txt    # Python dependencies
-├── README.md          # This file
-└── badge_image.jpg    # Sample image (created by setup)
+├── lastfm_tamagotchi.py    # Main tamagotchi application
+├── demo_tamagotchi.py      # Demo version for testing
+├── config.py               # Configuration settings
+├── discord_integration.py  # Discord notification system
+├── setup_tamagotchi.sh    # Tamagotchi setup script
+├── display_image.py        # Original image display
+├── setup.sh               # Original setup script
+├── requirements.txt        # Python dependencies
+├── test_tamagotchi.py     # Test suite
+├── .env.template          # Environment template
+├── README_TAMAGOTCHI.md   # Detailed tamagotchi docs
+├── README.md              # This file
+└── badge_image.jpg        # Sample image
 ```
 
-## Customization
+## 🎨 Tamagotchi Customization
 
-You can modify the script to:
+You can customize your tamagotchi by editing `config.py`:
+- Change pet name and appearance
+- Adjust evolution stages
+- Modify stat decay rates
+- Add new moods and features
+
+## 📖 Original Customization
+
+You can modify the original image display script to:
 - Add slideshow functionality
 - Include text overlays
 - Add transition effects
