@@ -59,6 +59,10 @@ THEME = {
     'text_offwhite': '#e0e0e0',  # Off-white for song, album, artist, timestamp
 }
 
+# Font cycling - track current font index
+current_font_index = 0
+available_fonts = []
+
 def load_env():
     """Load environment variables from .env file"""
     env_file = Path('.env')
@@ -251,17 +255,50 @@ def load_track_cache(cache_dir="cache", max_age_seconds=300):
         print(f"⚠️  Failed to load track cache: {e}")
         return None
 
-def load_font(size):
-    """Load custom font if available, otherwise fall back to system fonts"""
-    custom_font_path = Path("Micro5-Regular.ttf")
+def get_available_fonts():
+    """Get list of available font files"""
+    global available_fonts
+    if not available_fonts:
+        fonts_dir = Path("fonts")
+        if fonts_dir.exists() and fonts_dir.is_dir():
+            available_fonts = sorted(fonts_dir.glob("*.ttf"))
+    return available_fonts
+
+def load_font(size, font_index=None):
+    """Load custom font if available, otherwise fall back to system fonts
     
-    try:
-        if custom_font_path.exists() and custom_font_path.stat().st_size > 0:
-            # Load font without testing (testing can cause segfaults with bad fonts)
-            return ImageFont.truetype(str(custom_font_path), size)
-    except Exception as e:
-        # Silently fall back to system fonts
-        pass
+    Args:
+        size: Font size
+        font_index: Optional font index to use. If None, uses current_font_index
+    """
+    global current_font_index, available_fonts
+    
+    # Get available fonts if not already loaded
+    font_files = get_available_fonts()
+    
+    # Use provided index or current global index
+    if font_index is None:
+        font_index = current_font_index
+    
+    # Try to load the selected font from fonts directory
+    if font_files and len(font_files) > 0:
+        # Cycle through fonts using modulo
+        selected_font = font_files[font_index % len(font_files)]
+        try:
+            if selected_font.exists() and selected_font.stat().st_size > 0:
+                return ImageFont.truetype(str(selected_font), size)
+        except Exception:
+            # If selected font fails, try all fonts
+            pass
+    
+    # Fallback: try all fonts if selected one failed
+    if font_files:
+        for font_path in font_files:
+            try:
+                if font_path.exists() and font_path.stat().st_size > 0:
+                    return ImageFont.truetype(str(font_path), size)
+            except Exception:
+                continue
     
     # Try system fonts
     try:
@@ -272,6 +309,15 @@ def load_font(size):
     except Exception:
         # Final fallback to default font
         return ImageFont.load_default()
+
+def cycle_font():
+    """Cycle to the next font"""
+    global current_font_index, available_fonts
+    font_files = get_available_fonts()
+    if font_files and len(font_files) > 0:
+        current_font_index = (current_font_index + 1) % len(font_files)
+        font_name = font_files[current_font_index].stem
+        print(f"🔤 Font changed to: {font_name}")
 
 def render_display(track, album_art=None, offline=False):
     """Render track info to a PIL Image - stacked vertical layout"""
@@ -336,14 +382,14 @@ def render_display(track, album_art=None, offline=False):
         """Find the largest font size that fits text within max_width"""
         for size in range(start_size, min_size - 1, -1):
             try:
-                test_font = load_font(size)
+                test_font = load_font(size)  # Uses current_font_index automatically
                 bbox = draw.textbbox((0, 0), text, font=test_font)
                 if bbox[2] - bbox[0] <= max_width:
                     return test_font, size
             except:
                 continue
         # Fallback to minimum size
-        return load_font(min_size), min_size
+        return load_font(min_size), min_size  # Uses current_font_index automatically
     
     y = text_y_start
     
@@ -823,6 +869,14 @@ def main():
             sys.exit(0)
         i += 1
     
+    # Initialize fonts
+    font_files = get_available_fonts()
+    if font_files:
+        initial_font_name = font_files[current_font_index % len(font_files)].stem
+        print(f"🔤 Fonts loaded: {len(font_files)} ({initial_font_name} initial)")
+    else:
+        print("⚠️  No custom fonts found, using system fonts")
+    
     print(f"🎵 Pi Badge Display")
     print(f"   User: {username}")
     print(f"   Interval: {interval}s")
@@ -860,6 +914,9 @@ def main():
                 if track_hash != last_track_hash:
                     global current_track_info
                     print(f"🎵 {track['name']} - {track['artist']}")
+                    
+                    # Cycle to next font when song changes
+                    cycle_font()
                     
                     # Download album art
                     album_art = download_album_art(track.get('image_url'))
@@ -903,6 +960,9 @@ def main():
                     
                     if track_hash != last_track_hash:
                         print(f"📡 Offline - Using cached: {track['name']} - {track['artist']}")
+                        
+                        # Cycle to next font when song changes
+                        cycle_font()
                         
                         # Try to load cached album art
                         album_art = None
