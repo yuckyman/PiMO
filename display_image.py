@@ -259,11 +259,11 @@ def render_display(track, album_art=None, offline=False):
     img = Image.new('RGB', (RENDER_WIDTH, RENDER_HEIGHT), THEME['background'])
     draw = ImageDraw.Draw(img)
     
-    # Load fonts - larger for wider horizontal space
-    font_large = load_font(18)
-    font_medium = load_font(14)
-    font_small = load_font(11)
-    font_tiny = load_font(9)
+    # Load fonts - increased by 20%
+    font_large = load_font(22)  # 18 * 1.2
+    font_medium = load_font(17)  # 14 * 1.2
+    font_small = load_font(13)  # 11 * 1.2
+    font_tiny = load_font(11)  # 9 * 1.2
     
     # Album art section: square 1:1 aspect ratio (240x240)
     art_size = RENDER_WIDTH  # 240px square
@@ -278,11 +278,11 @@ def render_display(track, album_art=None, offline=False):
         draw.rectangle((0, 0, art_size, art_size), fill='#0a0a0a')
         draw.text((art_size//2 - 40, art_size//2 - 10), "🎵", fill='#333333', font=font_large)
     
-    # Text section: below art (remaining space)
+    # Text section: below art (remaining space) - increased horizontal spacing by 20%
     text_y_start = art_y_end + 5
     text_height = RENDER_HEIGHT - text_y_start
-    text_x = 10
-    text_width = RENDER_WIDTH - 20  # Full width minus padding
+    text_x = 12  # 10 * 1.2
+    text_width = RENDER_WIDTH - 24  # Full width minus padding (12px each side, 20% increase)
     
     # Status indicator
     status = "▶ NOW PLAYING" if track.get('now_playing') else "♫ LAST PLAYED"
@@ -292,7 +292,7 @@ def render_display(track, album_art=None, offline=False):
     
     # Track name (wrap for full width)
     track_name = track['name']
-    y = text_y_start + 18
+    y = text_y_start + 22  # 18 * 1.2
     
     # Word wrap for wider text area
     words = track_name.split()
@@ -310,40 +310,40 @@ def render_display(track, album_art=None, offline=False):
     if current_line:
         lines.append(current_line)
     
-    # Draw track name (max 2 lines to fit)
+    # Draw track name (max 2 lines to fit) - increased line spacing by 20%
     for line in lines[:2]:
         draw.text((text_x, y), line, fill=THEME['track'], font=font_large)
-        y += 22
+        y += 26  # 22 * 1.2
     
-    # Artist
-    y += 5
+    # Artist - increased spacing by 20%
+    y += 6  # 5 * 1.2
     artist = track['artist']
-    # Truncate if too long
+    # Truncate if too long - increased padding by 20%
     bbox = draw.textbbox((0, 0), artist, font=font_medium)
     if bbox[2] - bbox[0] > text_width:
         # Truncate with ellipsis
-        while bbox[2] - bbox[0] > text_width - 20 and len(artist) > 3:
+        while bbox[2] - bbox[0] > text_width - 24 and len(artist) > 3:  # 20 * 1.2
             artist = artist[:-1]
             bbox = draw.textbbox((0, 0), artist + "...", font=font_medium)
         artist = artist + "..."
     draw.text((text_x, y), artist, fill=THEME['artist'], font=font_medium)
     
-    # Album
-    y += 18
+    # Album - increased spacing by 20%
+    y += 22  # 18 * 1.2
     album = track.get('album', '')
     if album:
         bbox = draw.textbbox((0, 0), album, font=font_small)
         if bbox[2] - bbox[0] > text_width:
-            while bbox[2] - bbox[0] > text_width - 20 and len(album) > 3:
+            while bbox[2] - bbox[0] > text_width - 24 and len(album) > 3:  # 20 * 1.2
                 album = album[:-1]
                 bbox = draw.textbbox((0, 0), album + "...", font=font_small)
             album = album + "..."
         draw.text((text_x, y), album, fill=THEME['album'], font=font_small)
     
-    # Timestamp (bottom right)
+    # Timestamp (bottom right) - increased spacing by 20%
     timestamp = time.strftime("%H:%M")
     bbox = draw.textbbox((0, 0), timestamp, font=font_tiny)
-    timestamp_x = RENDER_WIDTH - bbox[2] + bbox[0] - 10
+    timestamp_x = RENDER_WIDTH - bbox[2] + bbox[0] - 12  # 10 * 1.2
     draw.text((timestamp_x, RENDER_HEIGHT - 15), timestamp, fill='#444444', font=font_tiny)
     
     return img
