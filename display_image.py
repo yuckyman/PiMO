@@ -253,7 +253,7 @@ def load_track_cache(cache_dir="cache", max_age_seconds=300):
 
 def load_font(size):
     """Load custom font if available, otherwise fall back to system fonts"""
-    custom_font_path = Path("Jacquard12-Regular.ttf")
+    custom_font_path = Path("Micro5-Regular.ttf")
     
     try:
         if custom_font_path.exists() and custom_font_path.stat().st_size > 0:
@@ -294,51 +294,18 @@ def render_display(track, album_art=None, offline=False):
     try:
         img = Image.new('RGB', (RENDER_WIDTH, RENDER_HEIGHT), THEME['background'])
         draw = ImageDraw.Draw(img)
+        # Disable antialiasing for crisp pixel-perfect text
+        draw.fontmode = "1"  # "1" = no antialiasing, "L" = antialiasing
     except Exception as e:
         raise ValueError(f"Failed to create image: {e}")
     
+    # Pixel alignment helper - ensures integer pixel positions
+    def align_pixel(value):
+        """Round to nearest integer for pixel-perfect alignment"""
+        return int(round(value))
+    
     # Use master font size
     master_font = load_font(MASTER_FONT_SIZE)
-    
-    # Helper function to render crisp text without antialiasing
-    def draw_crisp_text(x, y, text, font, fill_color):
-        """Render text at 2x resolution, then scale down with nearest neighbor for crisp pixels"""
-        scale = 2
-        # Get text bounding box at original size
-        bbox = draw.textbbox((0, 0), text, font=font)
-        text_w = bbox[2] - bbox[0]
-        text_h = bbox[3] - bbox[1]
-        
-        if text_w <= 0 or text_h <= 0:
-            return
-        
-        # Add extra padding to ensure full text is captured (especially for descenders)
-        padding_x = 6
-        padding_y_top = 4
-        padding_y_bottom = 8  # Extra space for descenders
-        temp_w = int(text_w * scale) + (padding_x * 2)
-        temp_h = int(text_h * scale) + padding_y_top + padding_y_bottom
-        temp_img = Image.new('RGB', (temp_w, temp_h), THEME['background'])
-        temp_draw = ImageDraw.Draw(temp_img)
-        
-        # Load font at 2x size
-        font_size = MASTER_FONT_SIZE * scale
-        scaled_font = load_font(font_size)
-        
-        # Draw text at 2x resolution with padding offset
-        temp_draw.text((padding_x, padding_y_top), text, fill=fill_color, font=scaled_font)
-        
-        # Scale down with nearest neighbor (no antialiasing)
-        final_w = int(text_w)
-        final_h = int(text_h)
-        scaled = temp_img.resize((final_w, final_h), Image.Resampling.NEAREST)
-        
-        # Paste onto main image
-        paste_x = int(x)
-        paste_y = int(y)
-        # Make sure we don't go out of bounds
-        if paste_x + final_w <= RENDER_WIDTH and paste_y + final_h <= RENDER_HEIGHT:
-            img.paste(scaled, (paste_x, paste_y))
     
     # Album art section: square 1:1 aspect ratio (240x240)
     art_size = RENDER_WIDTH  # 240px square
@@ -351,7 +318,7 @@ def render_display(track, album_art=None, offline=False):
     else:
         # No album art - draw placeholder square
         draw.rectangle((0, 0, art_size, art_size), fill='#0a0a0a')
-        draw_crisp_text(art_size//2 - 40, art_size//2 - 10, "🎵", master_font, '#333333')
+        draw.text((align_pixel(art_size//2 - 40), align_pixel(art_size//2 - 10)), "🎵", fill='#333333', font=master_font)
     
     # Text section: three rows below art
     text_y_start = art_y_end + 3
@@ -384,14 +351,14 @@ def render_display(track, album_art=None, offline=False):
     status = "now playing..."
     if offline:
         status = "📡 offline - " + status
-    draw_crisp_text(left_x, y, status, master_font, THEME['title'])
+    draw.text((align_pixel(left_x), align_pixel(y)), status, fill=THEME['title'], font=master_font)
     
     # Artist - right-aligned, auto-sized, off-white
     artist = track['artist']
     artist_font, _ = find_fitting_font(artist, container_width, start_size=MASTER_FONT_SIZE, min_size=20)
     bbox = draw.textbbox((0, 0), artist, font=artist_font)
-    artist_x = right_x + container_width - (bbox[2] - bbox[0])  # Right-align
-    draw_crisp_text(artist_x, y, artist, artist_font, THEME['text_offwhite'])
+    artist_x = align_pixel(right_x + container_width - (bbox[2] - bbox[0]))  # Right-align, pixel-aligned
+    draw.text((artist_x, align_pixel(y)), artist, fill=THEME['text_offwhite'], font=artist_font)
     
     # ROW 2: Song title (full width, left-aligned, off-white, scrolling if too long)
     y += 28
@@ -403,7 +370,7 @@ def render_display(track, album_art=None, offline=False):
     
     if text_width <= full_width:
         # Text fits, just display it
-        draw_crisp_text(left_x, y, track_name, master_font, THEME['text_offwhite'])
+        draw.text((align_pixel(left_x), align_pixel(y)), track_name, fill=THEME['text_offwhite'], font=master_font)
     else:
         # Text is too long, implement scrolling animation
         # Calculate scroll position based on time
@@ -430,23 +397,18 @@ def render_display(track, album_art=None, offline=False):
         max_scroll = text_width - full_width
         scroll_x = max(left_x - max_scroll, min(left_x, scroll_x))
         
-        # Create a temporary image for the full text to clip from (at 2x for crisp rendering)
-        scale = 2
-        temp_w = int((text_width + 20) * scale)
-        temp_h = int(30 * scale)
-        temp_img = Image.new('RGB', (temp_w, temp_h), THEME['background'])
+        # Create a temporary image for the full text to clip from
+        temp_img = Image.new('RGB', (text_width + 20, 30), THEME['background'])
         temp_draw = ImageDraw.Draw(temp_img)
-        scaled_font = load_font(MASTER_FONT_SIZE * scale)
-        temp_draw.text((10 * scale, 0), track_name, fill=THEME['text_offwhite'], font=scaled_font)
+        temp_draw.fontmode = "1"  # Disable antialiasing
+        temp_draw.text((align_pixel(10), align_pixel(0)), track_name, fill=THEME['text_offwhite'], font=master_font)
         
-        # Crop and paste the visible portion (scale down with nearest neighbor)
-        crop_x = max(0, int((left_x - scroll_x + 10) * scale))
-        crop_width = min(int(full_width * scale), int((text_width - (left_x - scroll_x + 10) + 10) * scale))
+        # Crop and paste the visible portion
+        crop_x = max(0, int(left_x - scroll_x + 10))
+        crop_width = min(full_width, text_width - crop_x + 10)
         if crop_width > 0:
-            cropped = temp_img.crop((crop_x, 0, crop_x + crop_width, temp_h))
-            # Scale down with nearest neighbor for crisp pixels
-            final_cropped = cropped.resize((crop_width // scale, temp_h // scale), Image.Resampling.NEAREST)
-            img.paste(final_cropped, (left_x, y))
+            cropped = temp_img.crop((crop_x, 0, crop_x + crop_width, 30))
+            img.paste(cropped, (left_x, y))
     
     y += 24  # Move down for next row
     
@@ -455,13 +417,13 @@ def render_display(track, album_art=None, offline=False):
     album = track.get('album', '')
     if album:
         album_font, _ = find_fitting_font(album, container_width, start_size=MASTER_FONT_SIZE, min_size=20)
-        draw_crisp_text(left_x, y, album, album_font, THEME['text_offwhite'])
+        draw.text((align_pixel(left_x), align_pixel(y)), album, fill=THEME['text_offwhite'], font=album_font)
     
     # Timestamp - right-aligned, off-white
     timestamp = time.strftime("%H:%M")
     bbox = draw.textbbox((0, 0), timestamp, font=master_font)
-    timestamp_x = right_x + container_width - (bbox[2] - bbox[0])  # Right-align
-    draw_crisp_text(timestamp_x, y, timestamp, master_font, THEME['text_offwhite'])
+    timestamp_x = align_pixel(right_x + container_width - (bbox[2] - bbox[0]))  # Right-align, pixel-aligned
+    draw.text((timestamp_x, align_pixel(y)), timestamp, fill=THEME['text_offwhite'], font=master_font)
     
     return img
 
@@ -469,33 +431,13 @@ def render_waiting():
     """Render a waiting screen"""
     img = Image.new('RGB', (RENDER_WIDTH, RENDER_HEIGHT), THEME['background'])
     draw = ImageDraw.Draw(img)
+    draw.fontmode = "1"  # Disable antialiasing
+    
+    # Pixel alignment helper
+    def align_pixel(value):
+        return int(round(value))
     
     font = load_font(MASTER_FONT_SIZE)
-    
-    # Helper function for crisp text
-    def draw_crisp_text(x, y, text, font, fill_color):
-        scale = 2
-        bbox = draw.textbbox((0, 0), text, font=font)
-        text_w = bbox[2] - bbox[0]
-        text_h = bbox[3] - bbox[1]
-        if text_w <= 0 or text_h <= 0:
-            return
-        padding_x = 6
-        padding_y_top = 4
-        padding_y_bottom = 8
-        temp_w = int(text_w * scale) + (padding_x * 2)
-        temp_h = int(text_h * scale) + padding_y_top + padding_y_bottom
-        temp_img = Image.new('RGB', (temp_w, temp_h), THEME['background'])
-        temp_draw = ImageDraw.Draw(temp_img)
-        scaled_font = load_font(MASTER_FONT_SIZE * scale)
-        temp_draw.text((padding_x, padding_y_top), text, fill=fill_color, font=scaled_font)
-        final_w = int(text_w)
-        final_h = int(text_h)
-        scaled = temp_img.resize((final_w, final_h), Image.Resampling.NEAREST)
-        paste_x = int(x)
-        paste_y = int(y)
-        if paste_x + final_w <= RENDER_WIDTH and paste_y + final_h <= RENDER_HEIGHT:
-            img.paste(scaled, (paste_x, paste_y))
     
     # Center text for portrait mode
     text1 = "🎵 Connecting..."
@@ -505,8 +447,8 @@ def render_waiting():
     x1 = (RENDER_WIDTH - (bbox1[2] - bbox1[0])) // 2
     x2 = (RENDER_WIDTH - (bbox2[2] - bbox2[0])) // 2
     
-    draw_crisp_text(x1, RENDER_HEIGHT // 2 - 20, text1, font, THEME['title'])
-    draw_crisp_text(x2, RENDER_HEIGHT // 2 + 10, text2, font, '#666666')
+    draw.text((align_pixel(x1), align_pixel(RENDER_HEIGHT // 2 - 20)), text1, fill=THEME['title'], font=font)
+    draw.text((align_pixel(x2), align_pixel(RENDER_HEIGHT // 2 + 10)), text2, fill='#666666', font=font)
     
     return img
 
@@ -514,39 +456,19 @@ def render_error(message):
     """Render an error screen"""
     img = Image.new('RGB', (RENDER_WIDTH, RENDER_HEIGHT), '#1a0000')
     draw = ImageDraw.Draw(img)
+    draw.fontmode = "1"  # Disable antialiasing
+    
+    # Pixel alignment helper
+    def align_pixel(value):
+        return int(round(value))
     
     font = load_font(MASTER_FONT_SIZE)
-    
-    # Helper function for crisp text
-    def draw_crisp_text(x, y, text, font, fill_color):
-        scale = 2
-        bbox = draw.textbbox((0, 0), text, font=font)
-        text_w = bbox[2] - bbox[0]
-        text_h = bbox[3] - bbox[1]
-        if text_w <= 0 or text_h <= 0:
-            return
-        padding_x = 6
-        padding_y_top = 4
-        padding_y_bottom = 8
-        temp_w = int(text_w * scale) + (padding_x * 2)
-        temp_h = int(text_h * scale) + padding_y_top + padding_y_bottom
-        temp_img = Image.new('RGB', (temp_w, temp_h), '#1a0000')
-        temp_draw = ImageDraw.Draw(temp_img)
-        scaled_font = load_font(MASTER_FONT_SIZE * scale)
-        temp_draw.text((padding_x, padding_y_top), text, fill=fill_color, font=scaled_font)
-        final_w = int(text_w)
-        final_h = int(text_h)
-        scaled = temp_img.resize((final_w, final_h), Image.Resampling.NEAREST)
-        paste_x = int(x)
-        paste_y = int(y)
-        if paste_x + final_w <= RENDER_WIDTH and paste_y + final_h <= RENDER_HEIGHT:
-            img.paste(scaled, (paste_x, paste_y))
     
     # Center error title
     error_text = "❌ Error"
     bbox = draw.textbbox((0, 0), error_text, font=font)
     x = (RENDER_WIDTH - (bbox[2] - bbox[0])) // 2
-    draw_crisp_text(x, RENDER_HEIGHT // 2 - 40, error_text, font, '#ff4444')
+    draw.text((align_pixel(x), align_pixel(RENDER_HEIGHT // 2 - 40)), error_text, fill='#ff4444', font=font)
     
     # Wrap error message (centered)
     words = message.split()
@@ -560,14 +482,14 @@ def render_error(message):
         else:
             if line:
                 bbox = draw.textbbox((0, 0), line, font=font)
-                x = (RENDER_WIDTH - (bbox[2] - bbox[0])) // 2
-                draw_crisp_text(x, y, line, font, '#888888')
+                x = align_pixel((RENDER_WIDTH - (bbox[2] - bbox[0])) // 2)
+                draw.text((x, align_pixel(y)), line, fill='#888888', font=font)
                 y += 16
             line = word
     if line:
         bbox = draw.textbbox((0, 0), line, font=font)
-        x = (RENDER_WIDTH - (bbox[2] - bbox[0])) // 2
-        draw_crisp_text(x, y, line, font, '#888888')
+        x = align_pixel((RENDER_WIDTH - (bbox[2] - bbox[0])) // 2)
+        draw.text((x, align_pixel(y)), line, fill='#888888', font=font)
     
     return img
 
