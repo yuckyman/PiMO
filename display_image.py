@@ -265,20 +265,20 @@ def render_display(track, album_art=None, offline=False):
     font_small = load_font(11)
     font_tiny = load_font(9)
     
-    # Album art section: top 180px
-    art_height = 180
-    art_y_end = art_height
+    # Album art section: square 1:1 aspect ratio (240x240)
+    art_size = RENDER_WIDTH  # 240px square
+    art_y_end = art_size
     
     if album_art:
-        # Resize to full width, maintain aspect ratio
-        art = album_art.resize((RENDER_WIDTH, art_height), Image.Resampling.LANCZOS)
+        # Resize to square (1:1 aspect ratio)
+        art = album_art.resize((art_size, art_size), Image.Resampling.LANCZOS)
         img.paste(art, (0, 0))  # Top-left corner
     else:
-        # No album art - draw placeholder
-        draw.rectangle((0, 0, RENDER_WIDTH, art_height), fill='#0a0a0a')
-        draw.text((RENDER_WIDTH//2 - 40, art_height//2 - 10), "🎵", fill='#333333', font=font_large)
+        # No album art - draw placeholder square
+        draw.rectangle((0, 0, art_size, art_size), fill='#0a0a0a')
+        draw.text((art_size//2 - 40, art_size//2 - 10), "🎵", fill='#333333', font=font_large)
     
-    # Text section: below art (remaining 140px)
+    # Text section: below art (remaining space)
     text_y_start = art_y_end + 5
     text_height = RENDER_HEIGHT - text_y_start
     text_x = 10
