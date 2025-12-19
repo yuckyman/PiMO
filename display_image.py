@@ -150,18 +150,30 @@ def download_album_art(url, cache_dir="cache"):
     
     if cached_file.exists():
         try:
-            return Image.open(cached_file)
-        except:
+            img = Image.open(cached_file)
+            # Convert to RGB safely
+            if img.mode != 'RGB':
+                img = img.convert('RGB')
+            return img
+        except Exception as e:
             # Corrupted cache, delete it
-            cached_file.unlink()
+            try:
+                cached_file.unlink()
+            except:
+                pass
     
     # Try the provided URL first
     try:
         response = requests.get(url, timeout=5, allow_redirects=True)
         if response.status_code == 200 and len(response.content) > 1000:  # Skip tiny/placeholder images
-            img = Image.open(BytesIO(response.content)).convert('RGB')
-            img.save(cached_file, 'PNG')
-            return img
+            img = Image.open(BytesIO(response.content))
+            # Convert to RGB safely
+            if img.mode != 'RGB':
+                img = img.convert('RGB')
+            # Validate dimensions
+            if img.size[0] > 0 and img.size[1] > 0:
+                img.save(cached_file, 'PNG')
+                return img
     except Exception:
         pass
     
@@ -186,10 +198,13 @@ def download_album_art(url, cache_dir="cache"):
     for alt_url in alternatives:
         try:
             response = requests.get(alt_url, timeout=5, allow_redirects=True)
-            if response.status_code == 200:
-                img = Image.open(BytesIO(response.content)).convert('RGB')
-                img.save(cached_file, 'PNG')
-                return img
+            if response.status_code == 200 and len(response.content) > 1000:
+                img = Image.open(BytesIO(response.content))
+                if img.mode != 'RGB':
+                    img = img.convert('RGB')
+                if img.size[0] > 0 and img.size[1] > 0:
+                    img.save(cached_file, 'PNG')
+                    return img
         except Exception:
             continue
     
@@ -240,9 +255,11 @@ def load_font(size):
     custom_font_path = Path("PKMN-Mystery-Dungeon.ttf")
     
     try:
-        if custom_font_path.exists():
+        if custom_font_path.exists() and custom_font_path.stat().st_size > 0:
+            # Load font without testing (testing can cause segfaults with bad fonts)
             return ImageFont.truetype(str(custom_font_path), size)
-    except:
+    except Exception as e:
+        # Silently fall back to system fonts
         pass
     
     # Try system fonts
@@ -251,13 +268,33 @@ def load_font(size):
             return ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", size)
         else:
             return ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", size)
-    except:
+    except Exception:
+        # Final fallback to default font
         return ImageFont.load_default()
 
 def render_display(track, album_art=None, offline=False):
     """Render track info to a PIL Image - stacked vertical layout"""
-    img = Image.new('RGB', (RENDER_WIDTH, RENDER_HEIGHT), THEME['background'])
-    draw = ImageDraw.Draw(img)
+    # Validate inputs
+    if not track:
+        track = {'name': 'Unknown', 'artist': 'Unknown', 'album': ''}
+    
+    # Ensure track has required fields
+    track = {
+        'name': str(track.get('name', 'Unknown')),
+        'artist': str(track.get('artist', 'Unknown')),
+        'album': str(track.get('album', '')),
+        'now_playing': bool(track.get('now_playing', False))
+    }
+    
+    # Validate dimensions
+    if RENDER_WIDTH <= 0 or RENDER_HEIGHT <= 0:
+        raise ValueError(f"Invalid render dimensions: {RENDER_WIDTH}x{RENDER_HEIGHT}")
+    
+    try:
+        img = Image.new('RGB', (RENDER_WIDTH, RENDER_HEIGHT), THEME['background'])
+        draw = ImageDraw.Draw(img)
+    except Exception as e:
+        raise ValueError(f"Failed to create image: {e}")
     
     # Load fonts - increased by 20%
     font_large = load_font(22)  # 18 * 1.2
@@ -278,30 +315,37 @@ def render_display(track, album_art=None, offline=False):
         draw.rectangle((0, 0, art_size, art_size), fill='#0a0a0a')
         draw.text((art_size//2 - 40, art_size//2 - 10), "🎵", fill='#333333', font=font_large)
     
-    # Text section: below art (remaining space) - increased horizontal spacing by 20%
-    text_y_start = art_y_end + 5
+    # Text section: two containers below art
+    text_y_start = art_y_end + 3
     text_height = RENDER_HEIGHT - text_y_start
-    text_x = 12  # 10 * 1.2
-    text_width = RENDER_WIDTH - 24  # Full width minus padding (12px each side, 20% increase)
+    
+    # Split into two containers
+    container_padding = 6
+    container_width = (RENDER_WIDTH - (container_padding * 3)) // 2  # Two containers with padding
+    left_x = container_padding
+    right_x = container_padding * 2 + container_width
+    
+    # LEFT CONTAINER: "now playing..." and song title
+    left_y = text_y_start
     
     # Status indicator
-    status = "▶ NOW PLAYING" if track.get('now_playing') else "♫ LAST PLAYED"
+    status = "now playing..."
     if offline:
-        status = "📡 OFFLINE - " + status
-    draw.text((text_x, text_y_start), status, fill=THEME['title'], font=font_tiny)
+        status = "📡 offline - " + status
+    draw.text((left_x, left_y), status, fill=THEME['title'], font=font_small)
     
-    # Track name (wrap for full width)
+    # Track name
+    left_y += 16
     track_name = track['name']
-    y = text_y_start + 22  # 18 * 1.2
     
-    # Word wrap for wider text area
+    # Word wrap for left container
     words = track_name.split()
     lines = []
     current_line = ""
     for word in words:
         test_line = f"{current_line} {word}".strip() if current_line else word
         bbox = draw.textbbox((0, 0), test_line, font=font_large)
-        if bbox[2] - bbox[0] <= text_width:
+        if bbox[2] - bbox[0] <= container_width:
             current_line = test_line
         else:
             if current_line:
@@ -310,41 +354,40 @@ def render_display(track, album_art=None, offline=False):
     if current_line:
         lines.append(current_line)
     
-    # Draw track name (max 2 lines to fit) - increased line spacing by 20%
+    # Draw track name (max 2 lines)
     for line in lines[:2]:
-        draw.text((text_x, y), line, fill=THEME['track'], font=font_large)
-        y += 26  # 22 * 1.2
+        draw.text((left_x, left_y), line, fill=THEME['track'], font=font_large)
+        left_y += 24
     
-    # Artist - increased spacing by 20%
-    y += 6  # 5 * 1.2
+    # RIGHT CONTAINER: artist, album, and time
+    right_y = text_y_start
+    
+    # Artist
     artist = track['artist']
-    # Truncate if too long - increased padding by 20%
     bbox = draw.textbbox((0, 0), artist, font=font_medium)
-    if bbox[2] - bbox[0] > text_width:
-        # Truncate with ellipsis
-        while bbox[2] - bbox[0] > text_width - 24 and len(artist) > 3:  # 20 * 1.2
+    if bbox[2] - bbox[0] > container_width:
+        while bbox[2] - bbox[0] > container_width - 20 and len(artist) > 3:
             artist = artist[:-1]
             bbox = draw.textbbox((0, 0), artist + "...", font=font_medium)
         artist = artist + "..."
-    draw.text((text_x, y), artist, fill=THEME['artist'], font=font_medium)
+    draw.text((right_x, right_y), artist, fill=THEME['artist'], font=font_medium)
     
-    # Album - increased spacing by 20%
-    y += 22  # 18 * 1.2
+    # Album
+    right_y += 20
     album = track.get('album', '')
     if album:
         bbox = draw.textbbox((0, 0), album, font=font_small)
-        if bbox[2] - bbox[0] > text_width:
-            while bbox[2] - bbox[0] > text_width - 24 and len(album) > 3:  # 20 * 1.2
+        if bbox[2] - bbox[0] > container_width:
+            while bbox[2] - bbox[0] > container_width - 20 and len(album) > 3:
                 album = album[:-1]
                 bbox = draw.textbbox((0, 0), album + "...", font=font_small)
             album = album + "..."
-        draw.text((text_x, y), album, fill=THEME['album'], font=font_small)
+        draw.text((right_x, right_y), album, fill=THEME['album'], font=font_small)
     
-    # Timestamp (bottom right) - increased spacing by 20%
+    # Timestamp (bottom of right container)
+    right_y += 20
     timestamp = time.strftime("%H:%M")
-    bbox = draw.textbbox((0, 0), timestamp, font=font_tiny)
-    timestamp_x = RENDER_WIDTH - bbox[2] + bbox[0] - 12  # 10 * 1.2
-    draw.text((timestamp_x, RENDER_HEIGHT - 15), timestamp, fill='#444444', font=font_tiny)
+    draw.text((right_x, right_y), timestamp, fill='#444444', font=font_tiny)
     
     return img
 
@@ -781,8 +824,16 @@ def main():
                         print("⚠️  No album art available")
                     
                     # Render and display
-                    img = render_display(track, album_art, offline=False)
-                    display.show(img)
+                    try:
+                        img = render_display(track, album_art, offline=False)
+                        if img and img.size[0] > 0 and img.size[1] > 0:
+                            display.show(img)
+                        else:
+                            print("⚠️  Invalid image generated, skipping display")
+                    except Exception as e:
+                        print(f"❌ Render error: {e}")
+                        import traceback
+                        traceback.print_exc()
                     
                     # Update track info for web server
                     current_track_info = {
@@ -814,8 +865,16 @@ def main():
                             album_art = download_album_art(track.get('image_url'))
                         
                         # Render with offline indicator
-                        img = render_display(track, album_art, offline=True)
-                        display.show(img)
+                        try:
+                            img = render_display(track, album_art, offline=True)
+                            if img and img.size[0] > 0 and img.size[1] > 0:
+                                display.show(img)
+                            else:
+                                print("⚠️  Invalid image generated, skipping display")
+                        except Exception as e:
+                            print(f"❌ Render error: {e}")
+                            import traceback
+                            traceback.print_exc()
                         
                         # Update track info for web server
                         current_track_info = {
