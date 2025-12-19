@@ -1,97 +1,843 @@
 #!/usr/bin/env python3
 """
-Simple image display script for Raspberry Pi Zero 2 W
-Displays an image in fullscreen mode
+Pi Badge LCD Display - Last.fm Now Playing
+Simple, self-contained script that queries Last.fm and displays on ILI9341 LCD
 """
 
-import tkinter as tk
-from PIL import Image, ImageTk
 import os
 import sys
 import time
+import hashlib
+import requests
+import threading
+import json
+from pathlib import Path
+from io import BytesIO
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from urllib.parse import urlparse
+from datetime import datetime
 
-class ImageDisplay:
-    def __init__(self, image_path):
-        self.root = tk.Tk()
-        self.root.title("Pi Badge Image Display")
-        
-        # Get screen dimensions
-        screen_width = self.root.winfo_screenwidth()
-        screen_height = self.root.winfo_screenheight()
-        
-        # Set window to fullscreen
-        self.root.geometry(f"{screen_width}x{screen_height}+0+0")
-        self.root.attributes('-fullscreen', True)
-        
-        # Load and resize image
-        self.load_image(image_path, screen_width, screen_height)
-        
-        # Bind escape key to exit
-        self.root.bind('<Escape>', lambda e: self.root.quit())
-        
-    def load_image(self, image_path, screen_width, screen_height):
-        """Load and resize image to fit screen"""
-        try:
-            # Open image
-            image = Image.open(image_path)
-            
-            # Calculate aspect ratio
-            img_width, img_height = image.size
-            aspect_ratio = img_width / img_height
-            screen_ratio = screen_width / screen_height
-            
-            # Resize image to fit screen while maintaining aspect ratio
-            if aspect_ratio > screen_ratio:
-                # Image is wider than screen
-                new_width = screen_width
-                new_height = int(screen_width / aspect_ratio)
-            else:
-                # Image is taller than screen
-                new_height = screen_height
-                new_width = int(screen_height * aspect_ratio)
-            
-            # Resize image
-            image = image.resize((new_width, new_height), Image.Resampling.LANCZOS)
-            
-            # Convert to PhotoImage
-            photo = ImageTk.PhotoImage(image)
-            
-            # Create label and center it
-            label = tk.Label(self.root, image=photo)
-            label.image = photo  # Keep a reference
-            label.place(relx=0.5, rely=0.5, anchor='center')
-            
-        except Exception as e:
-            print(f"Error loading image: {e}")
-            # Create error message
-            error_label = tk.Label(self.root, text=f"Error loading image: {e}", 
-                                 font=('Arial', 20), fg='red')
-            error_label.place(relx=0.5, rely=0.5, anchor='center')
+# LCD and image libraries
+from PIL import Image, ImageDraw, ImageFont
+
+# Try to import LCD libraries (only available on Pi)
+try:
+    from luma.core.interface.serial import spi
+    from luma.lcd.device import ili9341
+    LCD_AVAILABLE = True
+except ImportError:
+    LCD_AVAILABLE = False
+
+# Try to import GPIO for backlight PWM
+try:
+    import RPi.GPIO as GPIO
+    GPIO_AVAILABLE = True
+except ImportError:
+    try:
+        from gpiozero import PWMOutputDevice
+        GPIOZERO_AVAILABLE = True
+        GPIO_AVAILABLE = False
+    except ImportError:
+        GPIO_AVAILABLE = False
+        GPIOZERO_AVAILABLE = False
+
+# Display dimensions (hardware is 320x240, rotation makes it portrait)
+# For rendering, we use portrait dimensions (240x320)
+RENDER_WIDTH = 240
+RENDER_HEIGHT = 320
+# Hardware dimensions (used for device initialization)
+HW_WIDTH = 320
+HW_HEIGHT = 240
+
+# Theme colors
+THEME = {
+    'background': '#1a1a1a',
+    'title': '#00ff00',
+    'track': '#ffffff',
+    'artist': '#ff6b6b',
+    'album': '#74c0fc',
+}
+
+def load_env():
+    """Load environment variables from .env file"""
+    env_file = Path('.env')
+    if env_file.exists():
+        with open(env_file) as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith('#') and '=' in line:
+                    if line.startswith('export '):
+                        line = line[7:]
+                    key, value = line.split('=', 1)
+                    os.environ[key] = value.strip("'\"")
+
+def get_current_track(api_key, username, retries=3):
+    """Fetch current/recent track from Last.fm with retry logic"""
+    url = "http://ws.audioscrobbler.com/2.0/"
+    params = {
+        'method': 'user.getrecenttracks',
+        'user': username,
+        'api_key': api_key,
+        'format': 'json',
+        'limit': 1
+    }
     
-    def run(self):
-        """Start the display"""
-        self.root.mainloop()
+    # Retry with exponential backoff: 1s, 2s, 4s
+    for attempt in range(retries):
+        try:
+            # Reduced timeout for faster failure detection on hotspot
+            response = requests.get(url, params=params, timeout=5)
+            response.raise_for_status()
+            data = response.json()
+            
+            tracks = data.get('recenttracks', {}).get('track', [])
+            if tracks:
+                track = tracks[0]
+                # Try to get image URLs in order of preference
+                images = track.get('image', [])
+                image_url = None
+                # Try sizes in order: extralarge, large, medium, small
+                for size in ['extralarge', 'large', 'medium', 'small']:
+                    for img in images:
+                        if img.get('size') == size and img.get('#text'):
+                            image_url = img['#text']
+                            break
+                    if image_url:
+                        break
+                
+                return {
+                    'name': track.get('name', 'Unknown'),
+                    'artist': track.get('artist', {}).get('#text', 'Unknown'),
+                    'album': track.get('album', {}).get('#text', ''),
+                    'image_url': image_url,
+                    'now_playing': '@attr' in track and 'nowplaying' in track.get('@attr', {})
+                }
+        except requests.exceptions.Timeout:
+            if attempt < retries - 1:
+                wait_time = 2 ** attempt  # 1s, 2s, 4s
+                print(f"⏳ Timeout, retrying in {wait_time}s...")
+                time.sleep(wait_time)
+            else:
+                print(f"❌ Last.fm timeout after {retries} attempts")
+        except requests.exceptions.ConnectionError:
+            if attempt < retries - 1:
+                wait_time = 2 ** attempt
+                print(f"📡 Connection error, retrying in {wait_time}s...")
+                time.sleep(wait_time)
+            else:
+                print(f"❌ Last.fm connection failed after {retries} attempts")
+        except Exception as e:
+            print(f"❌ Last.fm error: {e}")
+            break  # Don't retry on other errors
+    
+    return None
+
+def download_album_art(url, cache_dir="cache"):
+    """Download album art with caching - tries multiple sizes if needed"""
+    if not url:
+        return None
+    
+    # Skip placeholder images (Last.fm uses these when no art is available)
+    if '2a96cbd8b46e442fc41c2b86b821562f' in url or '4128a6eb29f94943c9d206c08e625904' in url:
+        return None
+    
+    # Cache by URL hash
+    cache_path = Path(cache_dir)
+    cache_path.mkdir(exist_ok=True)
+    
+    url_hash = hashlib.md5(url.encode()).hexdigest()[:12]
+    cached_file = cache_path / f"{url_hash}.png"
+    
+    if cached_file.exists():
+        try:
+            return Image.open(cached_file)
+        except:
+            # Corrupted cache, delete it
+            cached_file.unlink()
+    
+    # Try the provided URL first
+    try:
+        response = requests.get(url, timeout=5, allow_redirects=True)
+        if response.status_code == 200 and len(response.content) > 1000:  # Skip tiny/placeholder images
+            img = Image.open(BytesIO(response.content)).convert('RGB')
+            img.save(cached_file, 'PNG')
+            return img
+    except Exception:
+        pass
+    
+    # If that failed, try alternative sizes by modifying the URL
+    # Last.fm URLs typically have size codes like: /174s/, /300x300/, etc.
+    # Try common alternatives
+    alternatives = []
+    
+    # Replace size codes in URL
+    if '/174s/' in url:
+        alternatives = [
+            url.replace('/174s/', '/300x300/'),
+            url.replace('/174s/', '/64s/'),
+            url.replace('/174s/', '/126s/'),
+        ]
+    elif '/300x300/' in url:
+        alternatives = [
+            url.replace('/300x300/', '/174s/'),
+            url.replace('/300x300/', '/64s/'),
+        ]
+    
+    for alt_url in alternatives:
+        try:
+            response = requests.get(alt_url, timeout=5, allow_redirects=True)
+            if response.status_code == 200:
+                img = Image.open(BytesIO(response.content)).convert('RGB')
+                img.save(cached_file, 'PNG')
+                return img
+        except Exception:
+            continue
+    
+    # All attempts failed
+    return None
+
+def save_track_cache(track, cache_dir="cache"):
+    """Save track data to cache with timestamp"""
+    cache_path = Path(cache_dir)
+    cache_path.mkdir(exist_ok=True)
+    
+    cache_file = cache_path / "last_track.json"
+    cache_data = {
+        'track': track,
+        'timestamp': time.time(),
+        'cached_at': datetime.now().isoformat()
+    }
+    
+    try:
+        with open(cache_file, 'w') as f:
+            json.dump(cache_data, f, indent=2)
+    except Exception as e:
+        print(f"⚠️  Failed to save track cache: {e}")
+
+def load_track_cache(cache_dir="cache", max_age_seconds=300):
+    """Load cached track data if available and not stale"""
+    cache_file = Path(cache_dir) / "last_track.json"
+    
+    if not cache_file.exists():
+        return None
+    
+    try:
+        with open(cache_file, 'r') as f:
+            cache_data = json.load(f)
+        
+        # Check if cache is stale
+        cache_age = time.time() - cache_data.get('timestamp', 0)
+        if cache_age > max_age_seconds:
+            return None
+        
+        return cache_data.get('track')
+    except Exception as e:
+        print(f"⚠️  Failed to load track cache: {e}")
+        return None
+
+def load_font(size):
+    """Load custom font if available, otherwise fall back to system fonts"""
+    custom_font_path = Path("PKMN-Mystery-Dungeon.ttf")
+    
+    try:
+        if custom_font_path.exists():
+            return ImageFont.truetype(str(custom_font_path), size)
+    except:
+        pass
+    
+    # Try system fonts
+    try:
+        if size >= 14:
+            return ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", size)
+        else:
+            return ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", size)
+    except:
+        return ImageFont.load_default()
+
+def render_display(track, album_art=None, offline=False):
+    """Render track info to a PIL Image - stacked vertical layout"""
+    img = Image.new('RGB', (RENDER_WIDTH, RENDER_HEIGHT), THEME['background'])
+    draw = ImageDraw.Draw(img)
+    
+    # Load fonts - larger for wider horizontal space
+    font_large = load_font(18)
+    font_medium = load_font(14)
+    font_small = load_font(11)
+    font_tiny = load_font(9)
+    
+    # Album art section: top 180px
+    art_height = 180
+    art_y_end = art_height
+    
+    if album_art:
+        # Resize to full width, maintain aspect ratio
+        art = album_art.resize((RENDER_WIDTH, art_height), Image.Resampling.LANCZOS)
+        img.paste(art, (0, 0))  # Top-left corner
+    else:
+        # No album art - draw placeholder
+        draw.rectangle((0, 0, RENDER_WIDTH, art_height), fill='#0a0a0a')
+        draw.text((RENDER_WIDTH//2 - 40, art_height//2 - 10), "🎵", fill='#333333', font=font_large)
+    
+    # Text section: below art (remaining 140px)
+    text_y_start = art_y_end + 5
+    text_height = RENDER_HEIGHT - text_y_start
+    text_x = 10
+    text_width = RENDER_WIDTH - 20  # Full width minus padding
+    
+    # Status indicator
+    status = "▶ NOW PLAYING" if track.get('now_playing') else "♫ LAST PLAYED"
+    if offline:
+        status = "📡 OFFLINE - " + status
+    draw.text((text_x, text_y_start), status, fill=THEME['title'], font=font_tiny)
+    
+    # Track name (wrap for full width)
+    track_name = track['name']
+    y = text_y_start + 18
+    
+    # Word wrap for wider text area
+    words = track_name.split()
+    lines = []
+    current_line = ""
+    for word in words:
+        test_line = f"{current_line} {word}".strip() if current_line else word
+        bbox = draw.textbbox((0, 0), test_line, font=font_large)
+        if bbox[2] - bbox[0] <= text_width:
+            current_line = test_line
+        else:
+            if current_line:
+                lines.append(current_line)
+            current_line = word
+    if current_line:
+        lines.append(current_line)
+    
+    # Draw track name (max 2 lines to fit)
+    for line in lines[:2]:
+        draw.text((text_x, y), line, fill=THEME['track'], font=font_large)
+        y += 22
+    
+    # Artist
+    y += 5
+    artist = track['artist']
+    # Truncate if too long
+    bbox = draw.textbbox((0, 0), artist, font=font_medium)
+    if bbox[2] - bbox[0] > text_width:
+        # Truncate with ellipsis
+        while bbox[2] - bbox[0] > text_width - 20 and len(artist) > 3:
+            artist = artist[:-1]
+            bbox = draw.textbbox((0, 0), artist + "...", font=font_medium)
+        artist = artist + "..."
+    draw.text((text_x, y), artist, fill=THEME['artist'], font=font_medium)
+    
+    # Album
+    y += 18
+    album = track.get('album', '')
+    if album:
+        bbox = draw.textbbox((0, 0), album, font=font_small)
+        if bbox[2] - bbox[0] > text_width:
+            while bbox[2] - bbox[0] > text_width - 20 and len(album) > 3:
+                album = album[:-1]
+                bbox = draw.textbbox((0, 0), album + "...", font=font_small)
+            album = album + "..."
+        draw.text((text_x, y), album, fill=THEME['album'], font=font_small)
+    
+    # Timestamp (bottom right)
+    timestamp = time.strftime("%H:%M")
+    bbox = draw.textbbox((0, 0), timestamp, font=font_tiny)
+    timestamp_x = RENDER_WIDTH - bbox[2] + bbox[0] - 10
+    draw.text((timestamp_x, RENDER_HEIGHT - 15), timestamp, fill='#444444', font=font_tiny)
+    
+    return img
+
+def render_waiting():
+    """Render a waiting screen"""
+    img = Image.new('RGB', (RENDER_WIDTH, RENDER_HEIGHT), THEME['background'])
+    draw = ImageDraw.Draw(img)
+    
+    font = load_font(16)
+    
+    # Center text for portrait mode
+    text1 = "🎵 Connecting..."
+    text2 = "Waiting for Last.fm"
+    bbox1 = draw.textbbox((0, 0), text1, font=font)
+    bbox2 = draw.textbbox((0, 0), text2, font=font)
+    x1 = (RENDER_WIDTH - (bbox1[2] - bbox1[0])) // 2
+    x2 = (RENDER_WIDTH - (bbox2[2] - bbox2[0])) // 2
+    
+    draw.text((x1, RENDER_HEIGHT // 2 - 20), text1, fill=THEME['title'], font=font)
+    draw.text((x2, RENDER_HEIGHT // 2 + 10), text2, fill='#666666', font=font)
+    
+    return img
+
+def render_error(message):
+    """Render an error screen"""
+    img = Image.new('RGB', (RENDER_WIDTH, RENDER_HEIGHT), '#1a0000')
+    draw = ImageDraw.Draw(img)
+    
+    font = load_font(14)
+    font_small = load_font(11)
+    
+    # Center error title
+    error_text = "❌ Error"
+    bbox = draw.textbbox((0, 0), error_text, font=font)
+    x = (RENDER_WIDTH - (bbox[2] - bbox[0])) // 2
+    draw.text((x, RENDER_HEIGHT // 2 - 40), error_text, fill='#ff4444', font=font)
+    
+    # Wrap error message (centered)
+    words = message.split()
+    line = ""
+    y = RENDER_HEIGHT // 2 - 10
+    for word in words:
+        test = f"{line} {word}".strip()
+        bbox = draw.textbbox((0, 0), test, font=font_small)
+        if bbox[2] - bbox[0] < RENDER_WIDTH - 40:
+            line = test
+        else:
+            if line:
+                bbox = draw.textbbox((0, 0), line, font=font_small)
+                x = (RENDER_WIDTH - (bbox[2] - bbox[0])) // 2
+                draw.text((x, y), line, fill='#888888', font=font_small)
+                y += 16
+            line = word
+    if line:
+        bbox = draw.textbbox((0, 0), line, font=font_small)
+        x = (RENDER_WIDTH - (bbox[2] - bbox[0])) // 2
+        draw.text((x, y), line, fill='#888888', font=font_small)
+    
+    return img
+
+class Display:
+    """LCD display wrapper (supports both real LCD and preview mode)"""
+    
+    def __init__(self, preview=False, brightness=100):
+        self.preview = preview
+        self.device = None
+        self.backlight_pwm = None
+        self.brightness = max(0, min(100, brightness))  # Clamp 0-100
+        
+        if not preview and LCD_AVAILABLE:
+            serial = spi(
+                port=0,
+                device=0,
+                gpio_DC=24,
+                gpio_RST=25,
+                bus_speed_hz=32000000
+            )
+            self.device = ili9341(serial, width=HW_WIDTH, height=HW_HEIGHT, rotate=3)
+            print("✅ LCD initialized")
+            
+            # Initialize backlight PWM on GPIO 18
+            self.init_backlight()
+        elif not preview:
+            print("⚠️  LCD not available, running in preview mode")
+            self.preview = True
+    
+    def init_backlight(self):
+        """Initialize PWM backlight on GPIO 18"""
+        BACKLIGHT_PIN = 18
+        PWM_FREQ = 1000  # 1kHz PWM frequency
+        
+        try:
+            if GPIO_AVAILABLE:
+                GPIO.setmode(GPIO.BCM)
+                GPIO.setup(BACKLIGHT_PIN, GPIO.OUT)
+                self.backlight_pwm = GPIO.PWM(BACKLIGHT_PIN, PWM_FREQ)
+                self.backlight_pwm.start(0)
+                self.set_brightness(self.brightness)
+                print(f"💡 Backlight initialized (GPIO {BACKLIGHT_PIN})")
+            elif GPIOZERO_AVAILABLE:
+                self.backlight_pwm = PWMOutputDevice(BACKLIGHT_PIN, frequency=PWM_FREQ)
+                self.set_brightness(self.brightness)
+                print(f"💡 Backlight initialized (GPIO {BACKLIGHT_PIN})")
+        except Exception as e:
+            print(f"⚠️  Backlight initialization failed: {e}")
+            self.backlight_pwm = None
+    
+    def set_brightness(self, brightness):
+        """Set backlight brightness (0-100)"""
+        self.brightness = max(0, min(100, brightness))
+        
+        if self.backlight_pwm is None:
+            return
+        
+        try:
+            if GPIO_AVAILABLE:
+                # RPi.GPIO uses 0-100 for duty cycle
+                self.backlight_pwm.ChangeDutyCycle(self.brightness)
+            elif GPIOZERO_AVAILABLE:
+                # gpiozero uses 0.0-1.0 for duty cycle
+                self.backlight_pwm.value = self.brightness / 100.0
+        except Exception as e:
+            print(f"⚠️  Brightness adjustment failed: {e}")
+    
+    def get_brightness(self):
+        """Get current brightness (0-100)"""
+        return self.brightness
+    
+    def show(self, img):
+        """Display an image"""
+        global current_display_img, current_display_bytes
+        
+        # Save for web server
+        current_display_img = img
+        img_bytes = BytesIO()
+        img.save(img_bytes, format='PNG')
+        current_display_bytes = img_bytes.getvalue()
+        
+        if self.device:
+            self.device.display(img)
+        
+        if self.preview:
+            # Save preview image
+            img.save('preview.png')
+            print(f"📸 Preview saved: preview.png")
+    
+    def clear(self):
+        """Clear the display and turn off backlight"""
+        img = Image.new('RGB', (RENDER_WIDTH, RENDER_HEIGHT), 'black')
+        if self.device:
+            self.device.display(img)
+        
+        # Turn off backlight
+        if self.backlight_pwm:
+            try:
+                if GPIO_AVAILABLE:
+                    self.backlight_pwm.ChangeDutyCycle(0)
+                elif GPIOZERO_AVAILABLE:
+                    self.backlight_pwm.value = 0.0
+            except:
+                pass
+    
+    def __del__(self):
+        """Cleanup on deletion"""
+        if self.backlight_pwm:
+            try:
+                if GPIO_AVAILABLE:
+                    self.backlight_pwm.stop()
+                    GPIO.cleanup()
+                elif GPIOZERO_AVAILABLE:
+                    self.backlight_pwm.close()
+            except:
+                pass
+
+# Global state for web server
+current_display_img = None
+current_track_info = None
+current_display_bytes = None
+
+class DisplayHandler(BaseHTTPRequestHandler):
+    """HTTP handler for web preview"""
+    
+    def do_GET(self):
+        global current_display_bytes, current_track_info
+        
+        if self.path == '/' or self.path == '/index.html':
+            self.serve_html()
+        elif self.path == '/display.png':
+            self.serve_image()
+        elif self.path == '/api/track':
+            self.serve_track_json()
+        else:
+            self.send_error(404)
+    
+    def serve_html(self):
+        """Serve HTML preview page"""
+        global current_track_info
+        
+        track = current_track_info or {}
+        html = f"""<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pi Badge Display</title>
+    <style>
+        body {{
+            margin: 0;
+            padding: 20px;
+            background: #0a0a0a;
+            color: #fff;
+            font-family: monospace;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }}
+        h1 {{
+            color: #00ff00;
+            margin-bottom: 10px;
+        }}
+        .display {{
+            border: 2px solid #333;
+            border-radius: 8px;
+            box-shadow: 0 4px 20px rgba(0,255,0,0.2);
+            margin: 20px 0;
+        }}
+        .info {{
+            margin-top: 20px;
+            text-align: center;
+            color: #888;
+        }}
+        .track {{
+            color: #fff;
+            font-size: 18px;
+            margin: 5px 0;
+        }}
+        .artist {{
+            color: #ff6b6b;
+            font-size: 14px;
+        }}
+        .album {{
+            color: #74c0fc;
+            font-size: 12px;
+        }}
+        .status {{
+            color: #00ff00;
+            font-size: 12px;
+            margin-top: 10px;
+        }}
+    </style>
+    <script>
+        function refreshDisplay() {{
+            const img = document.getElementById('display');
+            const timestamp = new Date().getTime();
+            img.src = '/display.png?t=' + timestamp;
+            
+            fetch('/api/track')
+                .then(r => r.json())
+                .then(data => {{
+                    if (data.track) {{
+                        document.getElementById('track').textContent = data.track.name || 'Unknown';
+                        document.getElementById('artist').textContent = data.track.artist || 'Unknown';
+                        document.getElementById('album').textContent = data.track.album || '';
+                        document.getElementById('status').textContent = data.track.now_playing ? '▶ NOW PLAYING' : '♫ LAST PLAYED';
+                    }}
+                }});
+        }}
+        
+        // Auto-refresh every 5 seconds
+        setInterval(refreshDisplay, 5000);
+        refreshDisplay();
+    </script>
+</head>
+<body>
+    <h1>🎵 Pi Badge Display</h1>
+    <div class="display">
+        <img id="display" src="/display.png" alt="Display" style="display: block; image-rendering: pixelated; image-rendering: crisp-edges;">
+    </div>
+    <div class="info">
+        <div id="status" class="status">Loading...</div>
+        <div id="track" class="track">-</div>
+        <div id="artist" class="artist">-</div>
+        <div id="album" class="album">-</div>
+    </div>
+</body>
+</html>"""
+        
+        self.send_response(200)
+        self.send_header('Content-type', 'text/html')
+        self.end_headers()
+        self.wfile.write(html.encode())
+    
+    def serve_image(self):
+        """Serve current display image"""
+        global current_display_bytes
+        
+        if current_display_bytes:
+            self.send_response(200)
+            self.send_header('Content-type', 'image/png')
+            self.send_header('Cache-Control', 'no-cache')
+            self.end_headers()
+            self.wfile.write(current_display_bytes)
+        else:
+            self.send_error(404, "No display image available")
+    
+    def serve_track_json(self):
+        """Serve current track info as JSON"""
+        global current_track_info
+        
+        import json
+        data = current_track_info or {}
+        json_data = json.dumps(data)
+        
+        self.send_response(200)
+        self.send_header('Content-type', 'application/json')
+        self.end_headers()
+        self.wfile.write(json_data.encode())
+    
+    def log_message(self, format, *args):
+        """Suppress default logging"""
+        pass
+
+def start_web_server(port=8080):
+    """Start web server in background thread"""
+    def run_server():
+        server = HTTPServer(('0.0.0.0', port), DisplayHandler)
+        print(f"🌐 Web preview: http://localhost:{port}")
+        print(f"📱 Network: http://[your-ip]:{port}")
+        server.serve_forever()
+    
+    thread = threading.Thread(target=run_server, daemon=True)
+    thread.start()
+    return thread
 
 def main():
-    # Default image path
-    default_image = "badge_image.jpg"
+    load_env()
     
-    # Get image path from command line or use default
-    image_path = sys.argv[1] if len(sys.argv) > 1 else default_image
+    api_key = os.getenv('LASTFM_API_KEY')
+    username = os.getenv('LASTFM_USERNAME')
     
-    # Check if image exists
-    if not os.path.exists(image_path):
-        print(f"Image file '{image_path}' not found!")
-        print("Please provide a valid image path as argument.")
-        print("Example: python display_image.py my_image.jpg")
-        return
+    if not api_key or not username:
+        print("❌ Missing credentials!")
+        print("Create a .env file with:")
+        print("  LASTFM_API_KEY='your_key'")
+        print("  LASTFM_USERNAME='your_username'")
+        sys.exit(1)
     
-    print(f"Displaying image: {image_path}")
-    print("Press ESC to exit")
+    # Parse args
+    interval = 30
+    preview = False
+    browser = False
+    port = 8080
+    brightness = 100  # Default brightness (0-100)
     
-    # Create and run display
-    display = ImageDisplay(image_path)
-    display.run()
+    i = 0
+    while i < len(sys.argv[1:]):
+        arg = sys.argv[1:][i]
+        if arg.isdigit():
+            interval = int(arg)
+        elif arg in ['--preview', '-p']:
+            preview = True
+        elif arg in ['--browser', '-b']:
+            browser = True
+            # Check for port number next
+            if i + 1 < len(sys.argv[1:]) and sys.argv[1:][i + 1].isdigit():
+                port = int(sys.argv[1:][i + 1])
+                i += 1
+        elif arg in ['--brightness', '--bright', '-br']:
+            # Check for brightness value next
+            if i + 1 < len(sys.argv[1:]):
+                try:
+                    brightness = int(sys.argv[1:][i + 1])
+                    brightness = max(0, min(100, brightness))  # Clamp 0-100
+                    i += 1
+                except ValueError:
+                    print(f"⚠️  Invalid brightness value, using default 100")
+        elif arg in ['--help', '-h']:
+            print("Usage: python display_image.py [interval] [options]")
+            print("  interval: Update interval in seconds (default: 30)")
+            print("  --preview, -p: Save images to preview.png instead of LCD")
+            print("  --browser, -b [port]: Start web server (default port: 8080)")
+            print("  --brightness, --bright, -br [0-100]: Set backlight brightness (default: 100)")
+            print("\nExamples:")
+            print("  python display_image.py 10 --browser")
+            print("  python display_image.py --browser 9000")
+            print("  python display_image.py --brightness 50")
+            print("  python display_image.py --brightness 75 --browser")
+            sys.exit(0)
+        i += 1
+    
+    print(f"🎵 Pi Badge Display")
+    print(f"   User: {username}")
+    print(f"   Interval: {interval}s")
+    print(f"   Mode: {'Preview' if preview else 'LCD'}")
+    if not preview:
+        print(f"   Brightness: {brightness}%")
+    if browser:
+        print(f"   Browser: http://localhost:{port}")
+    print("🛑 Press Ctrl+C to stop")
+    print()
+    
+    # Start web server if requested
+    if browser:
+        start_web_server(port)
+    
+    display = Display(preview=preview, brightness=brightness)
+    last_track_hash = None
+    
+    # Show waiting screen
+    waiting_img = render_waiting()
+    display.show(waiting_img)
+    
+    try:
+        while True:
+            offline = False
+            track = get_current_track(api_key, username)
+            
+            if track:
+                # Successfully fetched from API - save to cache
+                save_track_cache(track)
+                
+                # Check if track changed
+                track_hash = hashlib.md5(f"{track['name']}{track['artist']}".encode()).hexdigest()
+                
+                if track_hash != last_track_hash:
+                    global current_track_info
+                    print(f"🎵 {track['name']} - {track['artist']}")
+                    
+                    # Download album art
+                    album_art = download_album_art(track.get('image_url'))
+                    if album_art:
+                        print("🖼️  Album art loaded")
+                    else:
+                        print("⚠️  No album art available")
+                    
+                    # Render and display
+                    img = render_display(track, album_art, offline=False)
+                    display.show(img)
+                    
+                    # Update track info for web server
+                    current_track_info = {
+                        'track': {
+                            'name': track['name'],
+                            'artist': track['artist'],
+                            'album': track.get('album', ''),
+                            'now_playing': track.get('now_playing', False)
+                        }
+                    }
+                    
+                    last_track_hash = track_hash
+                else:
+                    print(f"⏰ No change ({time.strftime('%H:%M:%S')})")
+            else:
+                # API failed - try to load from cache
+                cached_track = load_track_cache()
+                if cached_track:
+                    offline = True
+                    track = cached_track
+                    track_hash = hashlib.md5(f"{track['name']}{track['artist']}".encode()).hexdigest()
+                    
+                    if track_hash != last_track_hash:
+                        print(f"📡 Offline - Using cached: {track['name']} - {track['artist']}")
+                        
+                        # Try to load cached album art
+                        album_art = None
+                        if track.get('image_url'):
+                            album_art = download_album_art(track.get('image_url'))
+                        
+                        # Render with offline indicator
+                        img = render_display(track, album_art, offline=True)
+                        display.show(img)
+                        
+                        # Update track info for web server
+                        current_track_info = {
+                            'track': {
+                                'name': track['name'],
+                                'artist': track['artist'],
+                                'album': track.get('album', ''),
+                                'now_playing': track.get('now_playing', False)
+                            }
+                        }
+                        
+                        last_track_hash = track_hash
+                    else:
+                        print(f"📡 Offline - No change ({time.strftime('%H:%M:%S')})")
+                else:
+                    print("❌ No track data and no cache available")
+            
+            time.sleep(interval)
+            
+    except KeyboardInterrupt:
+        print("\n👋 Bye!")
+        display.clear()
 
 if __name__ == "__main__":
-    main() 
+    main()

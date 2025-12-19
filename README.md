@@ -1,137 +1,158 @@
-# Pi Badge Image Display
+# Pi Badge - Last.fm Music Display
 
-A simple Python script to display images in fullscreen on a Raspberry Pi Zero 2 W.
+A clean, idempotent system that displays your current music on a Raspberry Pi badge with album art.
 
 ## Features
 
-- Fullscreen image display
-- Automatic image resizing to fit screen
-- Maintains aspect ratio
-- ESC key to exit
-- Support for common image formats (JPG, PNG, GIF, etc.)
+- 🎵 **Real-time music display** - Shows your current Last.fm track
+- 🖼️ **Album art integration** - Downloads and displays album artwork
+- 💾 **Smart caching** - Only downloads new tracks, caches everything
+- 🔄 **Idempotent operation** - Safe to run repeatedly
+- ⏰ **Configurable updates** - Set your own update interval
+- 🚫 **No tkinter issues** - Works on all platforms including macOS
 
-## Setup Instructions
+## Quick Start
 
-### 1. Prepare Your Micro SD Card
-
-1. Download and flash Raspberry Pi OS Lite to your micro SD card
-2. Enable SSH and configure WiFi (optional) by creating these files in the boot partition:
-   - `ssh` (empty file)
-   - `wpa_supplicant.conf` (if using WiFi)
-
-### 2. Boot Your Pi Zero 2 W
-
-1. Insert the micro SD card into your Pi Zero 2 W
-2. Connect power and wait for it to boot
-3. Connect via SSH or use a monitor/keyboard
-
-### 3. Install Dependencies
-
-Run the setup script:
-
+### 1. Set up your Last.fm credentials
+Create a `.env` file with your Last.fm API credentials:
 ```bash
-chmod +x setup.sh
-./setup.sh
+export LASTFM_API_KEY='your_api_key_here'
+export LASTFM_USERNAME='your_username_here'
 ```
 
-Or install manually:
+Get your API key from: https://www.last.fm/api/account/create
 
+### 2. Run the daemon
 ```bash
-sudo apt update
-sudo apt install -y python3-pip python3-tk python3-pil python3-pil.imagetk
-pip3 install Pillow
-chmod +x display_image.py
+# Start with default 30-second updates
+uv run lastfm_daemon.py
+
+# Or with custom update interval (10 seconds)
+uv run lastfm_daemon.py 10
 ```
 
-### 4. Add Your Images
-
-Place your image files in the same directory as the script. Supported formats:
-- JPG/JPEG
-- PNG
-- GIF
-- BMP
-- TIFF
-
-## Usage
-
-### Basic Usage
-
-Display the default image (`badge_image.jpg`):
+### 3. Display on Pi Badge
 ```bash
-python3 display_image.py
+# Check current display
+uv run display_current.py
+
+# Display on Pi Badge
+python3 display_image.py current_display.png
 ```
 
-### Custom Image
+## How it Works
 
-Display a specific image:
+### Daemon Mode (`lastfm_daemon.py`)
+- Runs continuously in the background
+- Checks Last.fm API every 30 seconds (configurable)
+- Downloads album art and creates display images
+- Caches everything to avoid re-downloading
+- Creates `current_display.png` symlink for easy access
+- Only updates when track changes (idempotent)
+
+### Caching System
+- **Cache directory**: `cache/`
+- **Album art**: `track_[hash]_art.png` (240x240 base)
+- **Full display**: `track_[hash]_full.png` (240x320 base, configurable upscaling)
+- **Current symlink**: `current_display.png` → latest display
+
+### Display Options
+- **Album art only**: 240x240 PNG format (base size)
+- **Full display**: 240x320 base resolution with configurable upscaling
+- **Upscaling options**: 1x (240x320), 2x (480x640), 3x (720x960), 4x (960x1280)
+- **Text fallback**: When no album art available
+
+## Files
+
+- `lastfm_daemon.py` - Main daemon script
+- `display_current.py` - Show current display info
+- `display_image.py` - Original Pi Badge display script
+- `cache/` - Album art and display cache
+- `.env` - Your Last.fm credentials
+- `current_display.png` - Symlink to current display
+
+## Pi Deployment
+
+### 1. Copy files to Pi
 ```bash
-python3 display_image.py your_image.jpg
+scp -r . pi@raspberrypi.local:~/pibadge/
 ```
 
-### Auto-start on Boot (Optional)
-
-To make the display start automatically when the Pi boots:
-
-1. Edit the autostart file:
+### 2. Set up on Pi
 ```bash
-sudo nano /etc/xdg/lxsession/LXDE-pi/autostart
+ssh pi@raspberrypi.local
+cd pibadge
+pip3 install requests pillow
 ```
 
-2. Add this line:
+### 3. Run daemon
+```bash
+# Start daemon
+python3 lastfm_daemon.py &
+
+# Display current image
+python3 display_image.py current_display.png
 ```
-@python3 /path/to/your/display_image.py
+
+### 4. Auto-start on boot (optional)
+Add to `/etc/rc.local`:
+```bash
+cd /home/pi/pibadge && python3 lastfm_daemon.py &
 ```
 
-3. Replace `/path/to/your/` with the actual path to your script.
+## Configuration
 
-## Controls
+### Environment Variables
+- `LASTFM_API_KEY` - Your Last.fm API key
+- `LASTFM_USERNAME` - Your Last.fm username
 
-- **ESC**: Exit the display
-- **Ctrl+C**: Force quit (if running in terminal)
+### Command Line Options
+- Update interval (seconds): `uv run lastfm_daemon.py 60`
+- Upscale factor (1-4x): `uv run lastfm_daemon.py 30 2` (30s updates, 2x upscaling)
+- Base resolution: 240x320 pixels
+- Supported upscaling: 1x (240x320), 2x (480x640), 3x (720x960), 4x (960x1280)
+
+### Cache Management
+- Cache is automatically managed
+- Old tracks are kept for reuse
+- Cache directory: `cache/`
 
 ## Troubleshooting
 
-### No Display Shows
-- Check if your image file exists and is readable
-- Ensure you have a display connected
-- Try running with a test image first
+### No display shows
+- Check if daemon is running: `ps aux | grep lastfm_daemon`
+- Check current display: `uv run display_current.py`
+- Verify credentials in `.env` file
 
-### Image Doesn't Fit Screen
-- The script automatically resizes images to fit the screen
-- Images maintain their aspect ratio
-- For best results, use images with 16:9 or 4:3 aspect ratios
+### API errors
+- Verify your API key and username
+- Check internet connection
+- Last.fm API has generous limits (5,000 requests/day)
 
-### Performance Issues
-- Use JPG format for large images
-- Optimize image size (800x600 or 1920x1080 recommended)
-- Close other applications to free up memory
+### Cache issues
+- Delete `cache/` directory to clear cache
+- Restart daemon: `pkill -f lastfm_daemon`
 
-## Hardware Requirements
+## Development
 
-- Raspberry Pi Zero 2 W
-- Micro SD card (8GB+ recommended)
-- Display (HDMI or composite)
-- Power supply (5V, 2.5A recommended)
+### Testing locally
+```bash
+# Start daemon with short interval
+uv run lastfm_daemon.py 10
 
-## File Structure
-
-```
-piBadge/
-├── display_image.py    # Main display script
-├── setup.sh           # Setup script
-├── requirements.txt    # Python dependencies
-├── README.md          # This file
-└── badge_image.jpg    # Sample image (created by setup)
+# Check current display
+uv run display_current.py
 ```
 
-## Customization
-
-You can modify the script to:
-- Add slideshow functionality
-- Include text overlays
-- Add transition effects
-- Implement remote control via network
+### Customization
+- Modify `create_album_display()` in `lastfm_daemon.py` for layout changes
+- Adjust colors, fonts, and positioning
+- Add more track information as needed
 
 ## License
 
-This project is open source. Feel free to modify and distribute! 
+This project is open source. Feel free to modify and distribute!
+
+---
+
+🎵 Your Pi Badge will now show your music taste to the world! 🎸 
