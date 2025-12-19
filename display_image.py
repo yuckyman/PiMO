@@ -422,7 +422,7 @@ class Display:
                 gpio_RST=25,
                 bus_speed_hz=32000000
             )
-            self.device = ili9341(serial, width=HW_WIDTH, height=HW_HEIGHT, rotate=3)
+            self.device = ili9341(serial, width=HW_WIDTH, height=HW_HEIGHT, rotate=1)
             print("✅ LCD initialized")
             
             # Initialize backlight PWM on GPIO 18
